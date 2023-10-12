@@ -5,6 +5,7 @@ import (
 	"go-upload-file-example/internal/models"
 	"go-upload-file-example/internal/services"
 	"go-upload-file-example/internal/utils"
+	"log"
 	"net/http"
 	"path/filepath"
 
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	maxFileSize  = 1024 * 2024
+	maxFileSize  = 2024 * 2024
 	allowedExt   = ".csv"
 	uploadFolder = "./public/uploads"
 )
@@ -76,6 +77,7 @@ func CreateFileHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
+		log.Println("Failed to get file")
 		errorResponse := utils.ErrorResponse{Error: "Failed to get file"}
 		jsonResponse, _ := json.Marshal(errorResponse)
 		w.Header().Set("Content-Type", "application/json")
@@ -89,6 +91,7 @@ func CreateFileHandler(w http.ResponseWriter, r *http.Request) {
 	fileName := fileHeader.Filename
 
 	if fileHeader.Size > maxFileSize {
+		log.Println("File size is too large")
 		errorResponse := utils.ErrorResponse{Error: "File size is too large"}
 		jsonResponse, _ := json.Marshal(errorResponse)
 		w.Header().Set("Content-Type", "application/json")
@@ -99,6 +102,7 @@ func CreateFileHandler(w http.ResponseWriter, r *http.Request) {
 
 	ext := filepath.Ext(fileName)
 	if ext != allowedExt {
+		log.Println("Invalid file extension")
 		errorResponse := utils.ErrorResponse{Error: "Invalid file extension"}
 		jsonResponse, _ := json.Marshal(errorResponse)
 		w.Header().Set("Content-Type", "application/json")

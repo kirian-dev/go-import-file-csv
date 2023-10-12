@@ -29,7 +29,7 @@ func Run() {
 
 	//generate test cvs file
 	fileName := "test_accounts.csv"
-	numAccounts := 40000
+	numAccounts := 10000
 	folderPath := "public"
 
 	err := scripts.GenerateCSV(fileName, numAccounts, folderPath)
