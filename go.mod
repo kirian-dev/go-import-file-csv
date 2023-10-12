@@ -1,4 +1,4 @@
-module go-upload-file-example
+module github.com/kirian-dev/go-import-file-csv
 
 go 1.20
 

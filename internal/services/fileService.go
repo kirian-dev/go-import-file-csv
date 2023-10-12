@@ -3,8 +3,6 @@ package services
 import (
 	"encoding/csv"
 	"fmt"
-	"go-upload-file-example/internal/models"
-	"go-upload-file-example/internal/utils"
 	"io"
 	"log"
 	"mime/multipart"
@@ -12,6 +10,9 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/kirian-dev/go-import-file-csv/internal/models"
+	"github.com/kirian-dev/go-import-file-csv/internal/utils"
 
 	"github.com/google/uuid"
 )

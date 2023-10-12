@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"go-upload-file-example/internal/handlers"
-	"go-upload-file-example/scripts"
 	"log"
 	"net/http"
+
+	"github.com/kirian-dev/go-import-file-csv/internal/handlers"
+	"github.com/kirian-dev/go-import-file-csv/scripts"
 
 	"github.com/gorilla/mux"
 )
@@ -29,7 +30,7 @@ func Run() {
 
 	//generate test cvs file
 	fileName := "test_accounts.csv"
-	numAccounts := 10000
+	numAccounts := 1000
 	folderPath := "public"
 
 	err := scripts.GenerateCSV(fileName, numAccounts, folderPath)

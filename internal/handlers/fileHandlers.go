@@ -2,12 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
-	"go-upload-file-example/internal/models"
-	"go-upload-file-example/internal/services"
-	"go-upload-file-example/internal/utils"
 	"log"
 	"net/http"
 	"path/filepath"
+
+	"github.com/kirian-dev/go-import-file-csv/internal/models"
+	"github.com/kirian-dev/go-import-file-csv/internal/services"
+	"github.com/kirian-dev/go-import-file-csv/internal/utils"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
