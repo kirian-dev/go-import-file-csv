@@ -21,30 +21,35 @@ type ProcessTask struct {
 	Line   []string
 	FileID uuid.UUID
 }
+type Semaphore struct {
+	C chan struct{}
+}
 
-type Worker struct {
-	ID        int
-	TaskQueue chan ProcessTask
-	Done      chan bool
-	WaitGroup *sync.WaitGroup
+func (s *Semaphore) Acquire() {
+	s.C <- struct{}{}
+}
+
+func (s *Semaphore) Release() {
+	<-s.C
 }
 
 const (
 	uploadFolder = "./public/uploads"
-	numWorkers   = 4
 	bufferSize   = 10
+	gCount       = 4
 )
 
 var (
-	accountsMap         = make(map[string]*models.Account)
-	filesMap            = make(map[uuid.UUID]*models.File)
-	loadingAccountsZero = make(chan struct{})
-	accountsMapMutex    sync.Mutex
-	filesMapMutex       sync.Mutex
+	accountsMap      = make(map[string]*models.Account)
+	filesMap         = make(map[uuid.UUID]*models.File)
+	accountsMapMutex sync.Mutex
+	filesMapMutex    sync.Mutex
 )
 
 func GetFileByID(id uuid.UUID) (*models.File, error) {
+	filesMapMutex.Lock()
 	f, exists := filesMap[id]
+	filesMapMutex.Unlock()
 	if !exists {
 		log.Println("couldn't get file")
 		return nil, fmt.Errorf("error getting file")
@@ -60,20 +65,7 @@ func CreateFileService(file *multipart.FileHeader) (*models.FileResponse, error)
 	tempFileName := utils.GenerateUniqueFileName(file.Filename)
 	tempFilePath := filepath.Join(uploadFolder, tempFileName)
 
-	src, err := file.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer src.Close()
-
-	dest, err := os.Create(tempFilePath)
-	if err != nil {
-		return nil, err
-	}
-	defer dest.Close()
-
-	_, err = io.Copy(dest, src)
-	if err != nil {
+	if err := saveFile(file, tempFilePath); err != nil {
 		return nil, err
 	}
 
@@ -82,7 +74,7 @@ func CreateFileService(file *multipart.FileHeader) (*models.FileResponse, error)
 		return nil, err
 	}
 
-	id, err := processFile(tempFilePath, tempFileName, rows)
+	id, err := processFile(tempFilePath, tempFileName, rows, gCount)
 	if err != nil {
 		return nil, err
 	}
@@ -93,23 +85,75 @@ func CreateFileService(file *multipart.FileHeader) (*models.FileResponse, error)
 	}, nil
 }
 
-func updateFileStatus(id uuid.UUID) {
-	filesMapMutex.Lock()
-	defer filesMapMutex.Unlock()
-	f, exists := filesMap[id]
-	if exists && f.LoadingAccounts == 0 {
-		f.Status = models.SuccessStatus
-		f.EndTime = time.Now()
+func createSemaphore(gCount int) *Semaphore {
+	return &Semaphore{
+		C: make(chan struct{}, gCount),
 	}
 }
 
-func processFile(filePath, tempFileName string, rows int) (uuid.UUID, error) {
-	file, err := os.Open(filePath)
+func saveFile(file *multipart.FileHeader, filePath string) error {
+	src, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dest, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer dest.Close()
+
+	_, err = io.Copy(dest, src)
+	return err
+}
+
+func processFile(filePath, tempFileName string, rows, gCount int) (uuid.UUID, error) {
+	newFile := createNewFile(tempFileName, rows)
+
+	sem := createSemaphore(gCount)
+
+	taskChannel := make(chan ProcessTask, bufferSize)
+	defer close(taskChannel)
+
+	reader, err := openCSVFile(filePath)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	defer file.Close()
+	var wg sync.WaitGroup
+	go func() {
+		skipHeader := true
+		for {
+			line, err := reader.Read()
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				handleReadError(err, newFile)
+			}
 
+			if skipHeader {
+				skipHeader = false
+				continue // pass first line
+			}
+
+			sem.Acquire()
+			wg.Add(1)
+			go func(line []string, fileID uuid.UUID) {
+				defer sem.Release()
+				defer wg.Done()
+				processTask(line, fileID)
+			}(line, newFile.ID)
+		}
+
+		wg.Wait()
+
+		updateFileStatus(newFile.ID)
+	}()
+
+	return newFile.ID, nil
+}
+func createNewFile(tempFileName string, rows int) *models.File {
 	newFile := &models.File{
 		ID:              uuid.New(),
 		Name:            tempFileName,
@@ -125,145 +169,97 @@ func processFile(filePath, tempFileName string, rows int) (uuid.UUID, error) {
 	filesMap[newFile.ID] = newFile
 	filesMapMutex.Unlock()
 
-	waitGroup := &sync.WaitGroup{}
-	taskChannel := make(chan ProcessTask, bufferSize)
-
-	workers := CreateJobPool(numWorkers, taskChannel, waitGroup)
-
-	reader := csv.NewReader(file)
-	skipHeader := true
-	for {
-		line, err := reader.Read()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Printf("Error reading line: %v", err)
-			filesMapMutex.Lock()
-			f, exists := filesMap[newFile.ID]
-			filesMapMutex.Unlock()
-			if exists {
-				f.LoadingAccounts--
-				f.FailAccounts++
-				continue
-			}
-		}
-
-		if skipHeader {
-			skipHeader = false
-			continue // pass the first line
-		}
-
-		task := ProcessTask{Line: line, FileID: newFile.ID}
-		taskChannel <- task
-	}
-
-	close(taskChannel)
-
-	for _, worker := range workers {
-		<-worker.Done
-	}
-
-	waitGroup.Wait()
-
-	go func() {
-		for {
-			filesMapMutex.Lock()
-			loadingAccounts := newFile.LoadingAccounts
-			filesMapMutex.Unlock()
-
-			if loadingAccounts == 0 {
-				loadingAccountsZero <- struct{}{}
-				return
-			}
-		}
-	}()
-
-	<-loadingAccountsZero
-
-	updateFileStatus(newFile.ID)
-
-	return newFile.ID, nil
+	return newFile
 }
 
-func (w *Worker) Run() {
-	defer func() {
-		w.WaitGroup.Done()
-		w.Done <- true
+func openCSVFile(filePath string) (*csv.Reader, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return csv.NewReader(file), nil
+}
 
-	}()
-
-	for task := range w.TaskQueue {
-		line := task.Line
-		fileID := task.FileID
-		go func() {
-			if !utils.ValidateLine(line) {
-				log.Printf("Invalid line: %v", line)
-				filesMapMutex.Lock()
-				f, exists := filesMap[fileID]
-				filesMapMutex.Unlock()
-				if exists {
-					f.FailAccounts++
-					f.LoadingAccounts--
-				}
-				return
-			}
-
-			accountEmail := line[2]
-
-			accountsMapMutex.Lock()
-			defer accountsMapMutex.Unlock()
-
-			if _, exists := accountsMap[accountEmail]; exists {
-				log.Printf("Account already exists: %s", accountEmail)
-				filesMapMutex.Lock()
-				f, exists := filesMap[fileID]
-				filesMapMutex.Unlock()
-				if exists {
-					f.FailAccounts++
-					f.LoadingAccounts--
-					return
-
-				}
-			}
-
-			log.Printf("Account created: %s", accountEmail)
-
-			account := &models.Account{
-				ID:        uuid.New(),
-				FirstName: line[0],
-				LastName:  line[1],
-				Email:     accountEmail,
-			}
-
-			accountsMap[accountEmail] = account
-
-			filesMapMutex.Lock()
-			defer filesMapMutex.Unlock()
-
-			file, exists := filesMap[fileID]
-			if exists {
-				file.SuccessAccounts++
-				file.LoadingAccounts--
-			}
-		}()
+func handleReadError(err error, newFile *models.File) {
+	log.Printf("Error reading line: %v", err)
+	filesMapMutex.Lock()
+	f, exists := filesMap[newFile.ID]
+	filesMapMutex.Unlock()
+	if exists {
+		f.LoadingAccounts--
+		f.FailAccounts++
 	}
 }
 
-func CreateJobPool(numWorkers int, taskChannel chan ProcessTask, waitGroup *sync.WaitGroup) []*Worker {
-	var workers []*Worker
+func updateFileStatus(id uuid.UUID) {
+	filesMapMutex.Lock()
+	f, exists := filesMap[id]
+	filesMapMutex.Unlock()
 
-	for i := 0; i < numWorkers; i++ {
-		worker := &Worker{
-			ID:        i,
-			TaskQueue: taskChannel,
-			Done:      make(chan bool),
-			WaitGroup: waitGroup,
-		}
-		workers = append(workers, worker)
-
-		waitGroup.Add(1)
-		go worker.Run()
+	if exists && f.LoadingAccounts == 0 {
+		f.Status = models.SuccessStatus
+		f.EndTime = time.Now()
 	}
-	return workers
+}
+
+func processTask(line []string, fileID uuid.UUID) {
+	if !utils.ValidateLine(line) {
+		handleInvalidLine(line, fileID)
+		return
+	}
+
+	accountEmail := line[2]
+
+	accountsMapMutex.Lock()
+	defer accountsMapMutex.Unlock()
+
+	if _, exists := accountsMap[accountEmail]; exists {
+		handleAccountExists(accountEmail, fileID)
+		return
+	}
+
+	createAccount(line, accountEmail, fileID)
+}
+
+func handleInvalidLine(line []string, fileID uuid.UUID) {
+	log.Printf("Invalid line: %v", line)
+	filesMapMutex.Lock()
+	f, exists := filesMap[fileID]
+	filesMapMutex.Unlock()
+	if exists {
+		f.FailAccounts++
+		f.LoadingAccounts--
+	}
+}
+
+func handleAccountExists(accountEmail string, fileID uuid.UUID) {
+	log.Printf("Account already exists: %s", accountEmail)
+	filesMapMutex.Lock()
+	f, exists := filesMap[fileID]
+	filesMapMutex.Unlock()
+	if exists {
+		f.FailAccounts++
+		f.LoadingAccounts--
+	}
+}
+
+func createAccount(line []string, accountEmail string, fileID uuid.UUID) {
+	log.Printf("Account created: %s", accountEmail)
+	account := &models.Account{
+		ID:        uuid.New(),
+		FirstName: line[0],
+		LastName:  line[1],
+		Email:     accountEmail,
+	}
+
+	accountsMap[accountEmail] = account
+
+	filesMapMutex.Lock()
+	defer filesMapMutex.Unlock()
+
+	f, exists := filesMap[fileID]
+	if exists {
+		f.SuccessAccounts++
+		f.LoadingAccounts--
+	}
 }
